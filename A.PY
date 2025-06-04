@@ -52,6 +52,9 @@ def convert_mol_to_poscar(input_pattern="molecule_*.mol", output_dir="output"):
         counts_line = " ".join(str(elem_counts[el]) for el in elements)
         poscar_lines.append(counts_line)
 
+        #补充cart
+        poscar_lines.append("cart")
+
         # 从第八行开始：保留所有原子坐标，按输入文件中的顺序，格式为 “x y z”
         for x, y, z, _ in coords:
             poscar_lines.append(f"{x} {y} {z}")
