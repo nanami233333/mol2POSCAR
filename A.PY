@@ -3,112 +3,128 @@ import glob
 
 def convert_mol_to_poscar(input_pattern="molecule_*.mol",
                           output_dir="output",
-                          margin=10.0):
+                          margin=15.0):
     """
-    将符合 input_pattern 的所有 .mol 文件转换为 POSCAR 格式，并写到 output_dir 下。
-    - margin: 在 x、y、z 三个方向的原子最小/最大值区间上，各额外加的真空层 (Å 单位)。
+    将匹配 input_pattern 的 .mol 文件，转换为 VASP 可用的 POSCAR 格式。
+    1) margin：在 x, y, z 三个方向各自的最小–最大范围上，加的真空层 (Å)。
+    2) 元素顺序：['O','C','H','N','F']。如果你的 .mol 里包含其他元素，请自行扩展此列表，并保持写入顺序一致。
     """
-    # 定义 POSCAR 中的元素顺序（如果你的 .mol 文件还包含其他元素，请在这里补充并保证顺序统一）
-    elements = ["O", "C", "H", "N", "F"]
 
+    # —— STEP 0: 准备输出目录 —— #
     os.makedirs(output_dir, exist_ok=True)
 
-    for filepath in glob.glob(input_pattern):
-        # 1) 先读取 .mol 文件，将所有原子按 “元素 -> 坐标列表” 存储
-        coords_by_elem = {el: [] for el in elements}
-        # 同时记录所有坐标以便后面计算最小/最大值
-        all_x, all_y, all_z = [], [], []
+    # —— STEP 1: 定义 POSCAR 中的元素顺序 —— #
+    elements = ["O", "C", "H", "N", "F", "Cl"]
+    # 创建一个方便检查的“空列表”，确保后面能按元素顺序往里塞坐标
+    # coords_by_elem['O'] = [(x1,y1,z1), (x2,y2,z2), ...]
+    coords_by_elem = {el: [] for el in elements}
 
+    # —— STEP 2: 遍历所有 .mol 文件 —— #
+    for filepath in glob.glob(input_pattern):
+        # 2.1 先清空字典与坐标记录
+        for el in elements:
+            coords_by_elem[el] = []
+        all_x, all_y, all_z = [], [], []  # 用来计算最小/最大
+
+        # 2.2 逐行读取 .mol（假设前 4 行是 header，从第 5 行开始是真正的“x y z 元素 0 0 0...”）
         with open(filepath, "r") as f:
             lines = f.readlines()
 
-        # Molecule 文件通常前 4 行是 header，从第 5 行（索引 4）开始才是真正的原子坐标
-        # 遇到以 'M' 开头的行（如 "M  END"）就停止
         for line in lines[4:]:
-            stripped = line.strip()
-            if stripped.startswith("M"):
+            s = line.strip()
+            if s.startswith("M"):
+                # 遇到 “M  END” 这样的行就停止原子读取
                 break
-
-            parts = stripped.split()
+            parts = s.split()
             if len(parts) >= 4:
-                x_f = float(parts[0])
-                y_f = float(parts[1])
-                z_f = float(parts[2])
-                el = parts[3]
-                # 只收集属于我们 elements 列表里的元素，其他类型忽略
+                try:
+                    x_f = float(parts[0])
+                    y_f = float(parts[1])
+                    z_f = float(parts[2])
+                    el = parts[3]
+                except ValueError:
+                    # 如果本行不是 “数值 数值 数值 元素”，就跳过
+                    continue
+
                 if el in coords_by_elem:
                     coords_by_elem[el].append((x_f, y_f, z_f))
                     all_x.append(x_f)
                     all_y.append(y_f)
                     all_z.append(z_f)
                 else:
-                    # 如果你的 .mol 里还有别的元素，请把它加到 elements 里；
-                    # 这里先简单提示，然后跳过
-                    print(f"警告：在文件 {filepath} 中发现未列入 {elements} 的元素 '{el}'，已忽略。")
+                    # 如果 .mol 里出现了不在 ['O','C','H','N','F'] 里的元素，会被忽略
+                    # 你可以在 elements 里自行添加所需元素并保持顺序
+                    print(f"⚠️   文件 {filepath} 中发现未列入 {elements} 的元素 '{el}'，已忽略。")
 
-        # 如果没有任何原子读到，则跳过
+        # 如果读不到任何原子，跳过该文件
         if len(all_x) == 0:
-            print(f"注意：文件 {filepath} 中没有读取到任何支持的原子，已跳过。")
+            print(f"⚠️   文件 {filepath} 中没有找到任何支持的原子，跳过。")
             continue
 
-        # 2) 计算 xyz 三个方向的最小/最大值
+        # —— STEP 3: 计算分子整体最小/最大坐标并生成“正交晶胞向量” —— #
         x_min, x_max = min(all_x), max(all_x)
         y_min, y_max = min(all_y), max(all_y)
         z_min, z_max = min(all_z), max(all_z)
 
-        # 3) 根据 (max - min) 加上 margin，得到正交晶胞的边长
+        # 根据范围加上 margin，得到最终晶胞的边长
         Lx = (x_max - x_min) + margin
         Ly = (y_max - y_min) + margin
         Lz = (z_max - z_min) + margin
 
-        # 4) 计算每个原子新的 “居中 + 平移” 后的坐标
-        #    公式： new_x = x - (x_min + x_max)/2 + Lx/2 = x - x_min + margin/2
-        #    下面遍历每个元素列表，把坐标转换好再一起写入 POSCAR。
+        # —— STEP 4: 把每个原子“居中”到晶胞中 —— #
+        # VASP POSCAR 中，如果写 Cartesian 坐标，就要保证所有点都在 [0, Lx] × [0, Ly] × [0, Lz] 范围里
+        # 我们先把原子坐标从 [x_min, x_max] 映射到 [0, x_max-x_min]，然后再在每个方向加上 margin/2，让分子整体居中
+        # new_x = (x_f - x_min) + margin/2
         shifted_by_elem = {el: [] for el in elements}
+        half_margin = margin / 2.0
         for el in elements:
             for (x_f, y_f, z_f) in coords_by_elem[el]:
-                x_new = x_f - x_min + margin / 2.0
-                y_new = y_f - y_min + margin / 2.0
-                z_new = z_f - z_min + margin / 2.0
-                shifted_by_elem[el].append((x_new, y_new, z_new))
+                new_x = (x_f - x_min) + half_margin
+                new_y = (y_f - y_min) + half_margin
+                new_z = (z_f - z_min) + half_margin
+                # 简单验证：new_x ∈ [ half_margin, (x_max - x_min) + half_margin ] = [ half_margin, Lx - half_margin ]
+                # 这样所有 new_x 均 ∈ [0, Lx]（边缘处没有 atom 贴着 0 或 Lx）
+                shifted_by_elem[el].append((new_x, new_y, new_z))
 
-        # 5) 准备 POSCAR 文件内容
+        # —— STEP 5: 开始拼接 POSCAR 文件的各行内容 —— #
         poscar_lines = []
-        # (1) 第一行：可以留空，也可以写注释。例如：# molecule_123.mol 
-        poscar_lines.append("")  
 
-        # (2) 第二行：缩放因子，一般写 1.0
+        # (1) 第一行：注释，可留空
+        name = os.path.splitext(os.path.basename(filepath))[0]  # “molecule_123”
+        poscar_lines.append(f"# Converted from {os.path.basename(filepath)}")
+
+        # (2) 第二行：缩放因子，通常写 1.0
         poscar_lines.append("1.00000000000000")
 
-        # (3)(4)(5) 晶格向量（正交晶胞）
-        poscar_lines.append(f"{Lx:.6f} 0.000000 0.000000")
-        poscar_lines.append(f"0.000000 {Ly:.6f} 0.000000")
-        poscar_lines.append(f"0.000000 0.000000 {Lz:.6f}")
+        # (3)(4)(5) 三个正交晶胞向量
+        poscar_lines.append(f"{Lx: .6f}  0.000000  0.000000")
+        poscar_lines.append(f"0.000000  {Ly: .6f}  0.000000")
+        poscar_lines.append(f"0.000000  0.000000  {Lz: .6f}")
 
         # (6) 元素顺序
         poscar_lines.append(" ".join(elements))
 
-        # (7) 各元素的计数
+        # (7) 各元素的个数（顺序要和第 6 行一致）
         counts = [len(coords_by_elem[el]) for el in elements]
         poscar_lines.append(" ".join(str(c) for c in counts))
 
-        # (8) 坐标类型：Cartesian
+        # (8) 坐标类型：Cartesian，一定要写！
         poscar_lines.append("Cartesian")
 
-        # (9) 坐标部分：一定要“逐元素顺序写入”，保证和上面第 (6)(7) 行的顺序一致
+        # (9) 坐标：必须“先把所有 O 写完，再把所有 C 写完……”
         for el in elements:
-            for (x_new, y_new, z_new) in shifted_by_elem[el]:
-                poscar_lines.append(f"{x_new:.6f} {y_new:.6f} {z_new:.6f} {el}")
+            for (new_x, new_y, new_z) in shifted_by_elem[el]:
+                poscar_lines.append(f"{new_x: .6f}  {new_y: .6f}  {new_z: .6f}  {el}")
 
-        # 6) 写入到对应的 .POSCAR 文件里
-        filename = os.path.basename(filepath)     # e.g. "molecule_123.mol"
-        name, _ = os.path.splitext(filename)      # e.g. "molecule_123"
+        # —— STEP 6: 写文件 —— #
         out_path = os.path.join(output_dir, f"{name}.POSCAR")
         with open(out_path, "w") as fout:
             fout.write("\n".join(poscar_lines))
 
-        print(f"生成成功：{out_path}")
+        print(f"✅  {filepath} → {out_path} (box = [{Lx:.2f}, {Ly:.2f}, {Lz:.2f}] Å)")
+
+    print("全部转换完毕。")
 
 if __name__ == "__main__":
-    # margin 可根据实际需要增大/缩小，比如改成 8.0 或 12.0：
-    convert_mol_to_poscar(input_pattern="molecule_*.mol", output_dir="output", margin=10.0)
+    # margin 可以根据需要自己调大/调小。例如一开始设为 10.0、12.0、15.0 都行，如果分子较密集，建议 15–20 Å。
+    convert_mol_to_poscar(input_pattern="molecule_*.mol", output_dir="output", margin=15.0)
